@@ -18,11 +18,12 @@ import {
   query,
   serverTimestamp,
   setDoc,
+  runTransaction,
   where,
 } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js';
-import { httpsCallable } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-functions.js';
-import { auth, db, functions, googleProvider } from './firebase.js';
+import { auth, db, googleProvider } from './firebase.js';
 import { initThreeBackground } from './three-bg.js';
+import { EMAILJS_PUBLIC_KEY, EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID } from './emailjs-config.js';
 import { createEnhancedSlipUrl, readPaymentSlipBlob, savePaymentSlipToFirestore } from './firestore-images.js';
 import {
   EVENT_NAME,
@@ -47,13 +48,194 @@ const state = {
   scanner: null,
 };
 
+function randomTicketToken() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function cleanTicketNumber(value) {
+  const v = String(value || '').trim().toUpperCase();
+  if (!/^[A-Z0-9][A-Z0-9\-_/]{1,29}$/.test(v)) {
+    throw new Error('Ticket number must be 2-30 characters using letters, numbers, -, _ or /.');
+  }
+  return v;
+}
+
+function batchLabel(batch) {
+  return batch === 'OL2023' ? '2023 O/L Batch' : batch === 'AL2026' ? '2026 A/L Batch' : String(batch || '');
+}
+
+async function sendTicketEmail(reg) {
+  if (!EMAILJS_SERVICE_ID || !EMAILJS_TEMPLATE_ID || !EMAILJS_PUBLIC_KEY) {
+    throw new Error('EmailJS Service ID / Template ID is not configured yet. Edit src/emailjs-config.js.');
+  }
+  const qrPayload = `AURELIA2K26:${reg.token}`;
+  const qrDataUri = await QRCode.toDataURL(qrPayload, {
+    width: 900,
+    margin: 2,
+    errorCorrectionLevel: 'H',
+  });
+  const response = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      service_id: EMAILJS_SERVICE_ID,
+      template_id: EMAILJS_TEMPLATE_ID,
+      user_id: EMAILJS_PUBLIC_KEY,
+      template_params: {
+        to_email: reg.email,
+        to_name: reg.fullName,
+        event_name: 'The Aurelia 2K26',
+        ticket_number: reg.ticketNumber,
+        full_name: reg.fullName,
+        batch: batchLabel(reg.batch),
+        class_name: reg.className,
+        id_number: reg.idNumber,
+        qr_image: qrDataUri,
+      },
+    }),
+  });
+  if (!response.ok) throw new Error(`EmailJS ${response.status}: ${await response.text()}`);
+  return true;
+}
+
+async function approveRegistrationDirect({ uid, ticketNumber }) {
+  const number = cleanTicketNumber(ticketNumber);
+  const registrationRef = doc(db, 'registrations', uid);
+  const ticketNumberRef = doc(db, 'ticketNumbers', number);
+  const token = randomTicketToken();
+  const ticketRef = doc(db, 'tickets', token);
+  let registrationData;
+
+  await runTransaction(db, async (tx) => {
+    const regSnap = await tx.get(registrationRef);
+    if (!regSnap.exists()) throw new Error('Registration not found.');
+    registrationData = regSnap.data();
+    if (registrationData.status !== 'pending') throw new Error('Only pending registrations can be approved.');
+    const numberSnap = await tx.get(ticketNumberRef);
+    if (numberSnap.exists()) throw new Error('That ticket number is already in use.');
+
+    tx.set(ticketNumberRef, { token, uid, createdAt: serverTimestamp() });
+    tx.set(ticketRef, {
+      token,
+      ticketNumber: number,
+      uid,
+      email: registrationData.email,
+      fullName: registrationData.fullName,
+      batch: registrationData.batch,
+      className: registrationData.className,
+      idNumber: registrationData.idNumber,
+      used: false,
+      usedAt: null,
+      usedBy: null,
+      createdAt: serverTimestamp(),
+      approvedBy: state.user.uid,
+    });
+    tx.update(registrationRef, {
+      status: 'approved',
+      ticketNumber: number,
+      ticketToken: token,
+      approvedAt: serverTimestamp(),
+      approvedBy: state.user.uid,
+      ticketUsed: false,
+      updatedAt: serverTimestamp(),
+      rejectionReason: null,
+    });
+  });
+
+  try {
+    await sendTicketEmail({ ...registrationData, ticketNumber: number, token });
+    await setDoc(registrationRef, { emailStatus: 'sent', emailSentAt: serverTimestamp(), emailError: null }, { merge: true });
+  } catch (error) {
+    console.warn('EmailJS send failed:', error);
+    await setDoc(registrationRef, { emailStatus: 'failed', emailError: String(error.message || error).slice(0, 500) }, { merge: true });
+    toast('Ticket approved, but email could not be sent. Configure EmailJS IDs, then use Resend email.', 'error');
+  }
+  return { ticketNumber: number, token };
+}
+
+async function rejectRegistrationDirect({ uid, reason }) {
+  const cleanReason = String(reason || '').trim().slice(0, 500);
+  if (!uid || !cleanReason) throw new Error('UID and rejection reason are required.');
+  const ref = doc(db, 'registrations', uid);
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists()) throw new Error('Registration not found.');
+    if (snap.data().status !== 'pending') throw new Error('Only pending registrations can be rejected.');
+    tx.update(ref, { status: 'rejected', rejectionReason: cleanReason, rejectedAt: serverTimestamp(), rejectedBy: state.user.uid, updatedAt: serverTimestamp() });
+  });
+  return { ok: true };
+}
+
+async function resendTicketEmailDirect({ uid }) {
+  const ref = doc(db, 'registrations', uid);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) throw new Error('Registration not found.');
+  const reg = snap.data();
+  if (reg.status !== 'approved' || !reg.ticketToken) throw new Error('Ticket is not approved.');
+  await sendTicketEmail({ ...reg, token: reg.ticketToken });
+  await setDoc(ref, { emailStatus: 'sent', emailSentAt: serverTimestamp(), emailError: null }, { merge: true });
+  return { ok: true };
+}
+
+async function setUserAdminDirect({ uid, admin }) {
+  const ref = doc(db, 'users', uid);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) throw new Error('User not found.');
+  const target = snap.data();
+  if (String(target.email || '').toLowerCase() === PRIMARY_ADMIN_EMAIL && admin !== true) {
+    throw new Error('The primary admin cannot be demoted.');
+  }
+  await setDoc(ref, { admin: admin === true, adminUpdatedAt: serverTimestamp(), adminUpdatedBy: state.user.uid }, { merge: true });
+  return { ok: true, uid, admin: admin === true };
+}
+
+function publicTicket(ticket) {
+  return {
+    ticketNumber: ticket.ticketNumber,
+    fullName: ticket.fullName,
+    batch: ticket.batch,
+    batchLabel: batchLabel(ticket.batch),
+    className: ticket.className,
+    idNumber: ticket.idNumber,
+  };
+}
+
+async function checkInTicketDirect({ token }) {
+  token = String(token || '').trim();
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(token)) throw new Error('Invalid ticket token.');
+  const ticketRef = doc(db, 'tickets', token);
+  const checkinRef = doc(collection(db, 'checkins'));
+  let result;
+
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ticketRef);
+    if (!snap.exists()) throw new Error('Ticket not found.');
+    const ticket = snap.data();
+    if (ticket.used === true) {
+      result = { status: 'already_used', ...publicTicket(ticket), usedAt: ticket.usedAt || null };
+      return;
+    }
+    tx.update(ticketRef, { used: true, usedAt: serverTimestamp(), usedBy: state.user.uid });
+    tx.set(checkinRef, { token, ticketNumber: ticket.ticketNumber, uid: ticket.uid, checkedInBy: state.user.uid, checkedInAt: serverTimestamp() });
+    tx.set(doc(db, 'registrations', ticket.uid), { ticketUsed: true, ticketUsedAt: serverTimestamp(), updatedAt: serverTimestamp() }, { merge: true });
+    result = { status: 'checked_in', ...publicTicket(ticket) };
+  });
+  if (result?.status === 'already_used' && result.usedAt) result.usedAtText = formatDate(result.usedAt);
+  return result;
+}
+
+// Spark-plan version: privileged actions are Firestore transactions protected by Firestore Rules.
+// The wrapper shape matches Firebase callable functions, keeping the UI unchanged.
 const fn = {
-  bootstrapAdmin: httpsCallable(functions, 'bootstrapAdmin'),
-  setUserAdmin: httpsCallable(functions, 'setUserAdmin'),
-  approveRegistration: httpsCallable(functions, 'approveRegistration'),
-  rejectRegistration: httpsCallable(functions, 'rejectRegistration'),
-  resendTicketEmail: httpsCallable(functions, 'resendTicketEmail'),
-  checkInTicket: httpsCallable(functions, 'checkInTicket'),
+  setUserAdmin: async (data) => ({ data: await setUserAdminDirect(data) }),
+  approveRegistration: async (data) => ({ data: await approveRegistrationDirect(data) }),
+  rejectRegistration: async (data) => ({ data: await rejectRegistrationDirect(data) }),
+  resendTicketEmail: async (data) => ({ data: await resendTicketEmailDirect(data) }),
+  checkInTicket: async (data) => ({ data: await checkInTicketDirect(data) }),
 };
 
 initThreeBackground();
@@ -150,17 +332,10 @@ async function prepareSignedInUser(user) {
     lastLoginAt: serverTimestamp(),
   }, { merge: true });
 
-  try {
-    const boot = await fn.bootstrapAdmin();
-    if (boot.data?.promoted) await user.getIdToken(true);
-  } catch (error) {
-    console.warn('Bootstrap admin check:', error);
-  }
-
-  const token = await user.getIdTokenResult(true);
+  const userDoc = await getDoc(doc(db, 'users', user.uid));
   const signedInEmail = String(user.email || '').trim().toLowerCase();
   const isPrimaryAdmin = signedInEmail === PRIMARY_ADMIN_EMAIL && user.emailVerified === true;
-  state.isAdmin = token.claims.admin === true || isPrimaryAdmin;
+  state.isAdmin = isPrimaryAdmin || userDoc.data()?.admin === true;
 
   state.unsubRegistration?.();
   state.unsubRegistration = onSnapshot(doc(db, 'registrations', user.uid), (snap) => {

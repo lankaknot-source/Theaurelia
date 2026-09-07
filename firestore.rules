@@ -1,27 +1,48 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    function signedIn() { return request.auth != null; }
-    function isAdmin() {
-      return signedIn() && (
-        request.auth.token.admin == true ||
-        (request.auth.token.email == 'lankaknot@gmail.com' && request.auth.token.email_verified == true)
-      );
+    function signedIn() {
+      return request.auth != null;
     }
-    function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
+
+    function isPrimaryAdmin() {
+      return signedIn()
+        && request.auth.token.email == 'lankaknot@gmail.com'
+        && request.auth.token.email_verified == true;
+    }
+
+    function isStoredAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.admin == true;
+    }
+
+    function isAdmin() {
+      return isPrimaryAdmin() || isStoredAdmin();
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
 
     match /users/{uid} {
       allow create: if isOwner(uid)
         && request.resource.data.uid == request.auth.uid
-        && request.resource.data.email == request.auth.token.email;
+        && request.resource.data.email == request.auth.token.email
+        && (!('admin' in request.resource.data) || request.resource.data.admin == false);
+
       allow read: if isOwner(uid) || isAdmin();
-      allow update: if isOwner(uid)
-        && request.resource.data.diff(resource.data).affectedKeys()
-          .hasOnly(['displayName', 'photoURL', 'email', 'lastLoginAt']);
-      allow update, delete: if isAdmin();
+
+      allow update: if (
+          isOwner(uid)
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['displayName', 'photoURL', 'email', 'lastLoginAt'])
+        ) || isAdmin();
+
+      allow delete: if false;
     }
 
-    // Compressed bank-slip image metadata. Image bytes live only in Firestore chunks.
+    // Bank slip metadata. Image bytes are compressed and split into Firestore byte chunks.
     match /paymentSlips/{slipId} {
       allow create: if signedIn()
         && !exists(/databases/$(database)/documents/registrations/$(request.auth.uid))
@@ -30,6 +51,7 @@ service cloud.firestore {
         && request.resource.data.byteLength <= 4 * 1024 * 1024
         && request.resource.data.chunkCount >= 1
         && request.resource.data.chunkCount <= 8;
+
       allow read: if isAdmin() || (signedIn() && resource.data.ownerUid == request.auth.uid);
       allow update, delete: if false;
 
@@ -39,8 +61,10 @@ service cloud.firestore {
           && request.resource.data.index is int
           && request.resource.data.bytes is bytes
           && request.resource.data.bytes.size() <= 720 * 1024;
+
         allow read: if isAdmin()
           || (signedIn() && get(/databases/$(database)/documents/paymentSlips/$(slipId)).data.ownerUid == request.auth.uid);
+
         allow update, delete: if false;
       }
     }
@@ -65,22 +89,26 @@ service cloud.firestore {
         && request.resource.data.paymentAmount == 5500
         && request.resource.data.paymentSlipId is string
         && get(/databases/$(database)/documents/paymentSlips/$(request.resource.data.paymentSlipId)).data.ownerUid == request.auth.uid;
+
       allow read: if isOwner(uid) || isAdmin();
-      allow update, delete: if false;
+      allow update: if isAdmin();
+      allow delete: if false;
     }
 
     match /tickets/{token} {
       allow read: if isAdmin() || (signedIn() && resource.data.uid == request.auth.uid);
-      allow write: if false;
-    }
-
-    match /checkins/{id} {
-      allow read: if isAdmin();
-      allow write: if false;
+      allow create, update: if isAdmin();
+      allow delete: if false;
     }
 
     match /ticketNumbers/{ticketNumber} {
-      allow read, write: if false;
+      allow read, create: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    match /checkins/{id} {
+      allow read, create: if isAdmin();
+      allow update, delete: if false;
     }
   }
 }

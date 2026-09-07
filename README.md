@@ -1,208 +1,77 @@
-# The Aurelia 2K26 Ticketing System
+# The Aurelia 2K26 — Spark / No-Blaze Edition
 
-> GitHub Pages note: this revision includes a browser import map and a static Pages workflow, so `qrcode`, Firebase, html5-qrcode and Three.js resolve even when the source tree is served directly. See `GITHUB-PAGES-SETUP.md`.
+This edition is designed to run without Firebase Cloud Functions, so Firebase's Blaze billing upgrade is not required for the app workflow.
 
-# The Aurelia 2K26 — Secure QR Ticketing System
+## What works without Cloud Functions
 
-Production-oriented web ticketing system for **The Aurelia 2K26** using HTML, Tailwind CSS, JavaScript, Three.js, Firebase Authentication, Cloud Firestore, Firebase Cloud Functions, QR codes and EmailJS.
+- Google sign-in
+- `lankaknot@gmail.com` as protected primary admin
+- Promote/demote other signed-in users as full admins
+- 2023 O/L and 2026 A/L registration
+- Rs. 5,500 payment proof upload
+- Client-side WebP compression and Firestore-only image chunks
+- Admin payment-slip viewer
+- Approval/rejection
+- Unique manual ticket number protection using a Firestore transaction
+- Cryptographically random unique QR token
+- Ticket display in the user's portal
+- QR scanner and one-time atomic check-in
+- EmailJS ticket sending from the browser using the EmailJS Public Key
 
-## What is included
+## 1. Deploy Firestore rules
 
-- Google/Gmail login only.
-- Firebase project is already configured for `the-aurelia-2k26` in `src/firebase.js`.
-- `lankaknot@gmail.com` is the protected primary admin.
-- A full admin can promote/demote any signed-in user; the primary admin cannot be demoted.
-- User chooses **2023 O/L Batch** or **2026 A/L Batch**.
-- Registration: full name, correct batch class, ID number and LKR 5,500 bank payment slip.
-- Bank slip is compressed in the browser to WebP and stored **inside Cloud Firestore**, not Firebase Storage.
-- Because Firestore documents have a 1 MiB limit, the compressed image is split into approximately 700 KiB binary chunk documents under `paymentSlips/{slipId}/chunks/`.
-- Admin viewer rebuilds the chunks and applies high-quality browser resampling/contrast enhancement for clearer inspection. Compression cannot recreate detail that was never captured in the source photo.
-- Admin reviews payment proof, enters a unique ticket number and approves.
-- Approval creates a cryptographically random QR token.
-- QR ticket is emailed through EmailJS and is also shown in the logged-in portal.
-- QR scanner is admin-only.
-- First successful gate scan atomically changes the ticket to `USED`; repeat scans show `ALREADY USED`.
-- Ticket number uniqueness is enforced in Firestore transaction logic.
+From this folder:
 
-## Firebase project already configured
-
-```text
-Project ID: the-aurelia-2k26
-Auth domain: the-aurelia-2k26.firebaseapp.com
-Storage bucket: the-aurelia-2k26.firebasestorage.app
-Functions region: asia-south1
-```
-
-The Firebase Web API key/config supplied for this app is already in `src/firebase.js`. Firebase web configuration is client-visible by design; actual access is protected with Authentication, Security Rules and server-side admin claims.
-
-## Firebase Console setup
-
-1. Firebase Console → **Authentication** → Sign-in method → enable **Google**.
-2. Firebase Console → **Firestore Database** → create the database.
-3. If Firebase asks for an authorized domain, add your Firebase Hosting/custom domain.
-4. Use a billing plan that supports the Cloud Functions setup you deploy.
-
-## EmailJS setup
-
-The app deliberately does **not** place the EmailJS private key in browser JavaScript. Email is sent from a Firebase Cloud Function.
-
-You need four EmailJS values:
-
-- Service ID
-- Template ID
-- Public Key
-- Private Key
-
-Save them to Firebase Secret Manager by running:
-
-```bash
-./scripts/configure-emailjs.sh
-```
-
-or manually:
-
-```bash
-firebase functions:secrets:set EMAILJS_SERVICE_ID
-firebase functions:secrets:set EMAILJS_TEMPLATE_ID
-firebase functions:secrets:set EMAILJS_PUBLIC_KEY
-firebase functions:secrets:set EMAILJS_PRIVATE_KEY
-```
-
-### EmailJS template
-
-1. Create/open your EmailJS email template.
-2. Copy the HTML from `emailjs-template.html` into the template source editor.
-3. Set **To Email** to:
-
-```text
-{{to_email}}
-```
-
-4. In the template **Attachments** tab add a **Variable Attachment**:
-   - Parameter name: `qr_image`
-   - Filename: `Aurelia-{{ticket_number}}.png`
-   - Content type: PNG
-5. The HTML uses `cid:qr_image`, so the generated ticket QR is embedded in the email.
-
-Template parameters sent by the function:
-
-```text
-to_email
-to_name
-event_name
-ticket_number
-full_name
-batch
-class_name
-id_number
-qr_image
-```
-
-## Install
-
-Requirements: Node.js 20+, npm, Firebase CLI.
-
-```bash
-npm install
-cd functions
-npm install
-cd ..
-```
-
-Login to Firebase CLI if needed:
-
-```bash
+```powershell
 firebase login
+firebase use the-aurelia-2k26
+firebase deploy --only firestore:rules,firestore:indexes
 ```
 
-The `.firebaserc` already points to:
+Do **not** run `firebase deploy --only functions` in this edition. There is no `functions` folder.
 
-```text
-the-aurelia-2k26
-```
+## 2. GitHub Pages
 
-## Local development
+Upload the complete project to the repository. In GitHub:
 
-```bash
-npm run dev
-```
+Settings -> Pages -> Source -> GitHub Actions
 
-Camera scanning requires HTTPS or localhost.
+The included workflow publishes `index.html` and `src/` directly.
 
-## Deploy
+## 3. Firebase Authentication
 
-```bash
-npm run build
-firebase deploy --only firestore:rules,functions,hosting
-```
+Firebase Console -> Authentication -> Sign-in method -> Google -> Enable.
 
-## First admin login
+Firebase Console -> Authentication -> Settings -> Authorized domains -> add:
 
-Sign in using **lankaknot@gmail.com**. `bootstrapAdmin` verifies the signed-in Google email and gives that Firebase user the `admin: true` custom claim. The function uses the Firebase Auth user record's existing custom claims so reserved token claims are never copied into custom claims.
+`lankaknot-source.github.io`
 
-After promotion the client refreshes its ID token automatically.
+The protected primary admin is:
 
-## Firestore structure
+`lankaknot@gmail.com`
 
-```text
-users/{uid}
-registrations/{uid}
-paymentSlips/{slipId}
-paymentSlips/{slipId}/chunks/{000..007}
-tickets/{secureRandomToken}
-ticketNumbers/{ticketNumber}
-checkins/{autoId}
-```
+## 4. EmailJS
 
-Example registration:
+Open `src/emailjs-config.js`.
+
+The Public Key is already set. Fill in:
 
 ```js
-{
-  uid,
-  email,
-  fullName,
-  batch: "OL2023" | "AL2026",
-  className,
-  idNumber,
-  paymentAmount: 5500,
-  paymentSlipId,
-  paymentSlipBytes,
-  paymentSlipChunks,
-  paymentSlipMimeType,
-  status: "pending" | "approved" | "rejected",
-  ticketNumber,
-  ticketToken,
-  ticketUsed,
-  createdAt,
-  updatedAt
-}
+export const EMAILJS_SERVICE_ID = 'service_xxxxx';
+export const EMAILJS_TEMPLATE_ID = 'template_xxxxx';
 ```
 
-## Security design
+Copy `emailjs-template.html` into the EmailJS template HTML editor. Configure the template recipient with `{{to_email}}`. For the QR, configure a Variable Attachment with parameter name `qr_image` and CID `qr_image` so the included `<img src="cid:qr_image">` works.
 
-- Admin authorization is based on Firebase **custom claims**, not a user-editable `admin` field.
-- User registration approval/rejection and gate check-in happen in Cloud Functions using Firebase Admin SDK.
-- Users cannot create ticket documents or mark tickets as used.
-- Payment-slip chunks are readable only by the owner or an admin.
-- Payment-slip chunks cannot be edited after creation.
-- Ticket numbers are reserved in a dedicated document so duplicate numbers are rejected.
-- Check-in uses a Firestore transaction, preventing two scanners from successfully using the same ticket concurrently.
-- EmailJS Private Key remains a server secret.
+This browser-only edition intentionally does NOT use the EmailJS Private Key. Never put the Private Key in browser JavaScript.
 
-## Before the event
+Because a Private Key was previously shared, rotate/regenerate it in EmailJS before using it for any future server-side integration.
 
-Test these exact flows on real phones:
+## Security model
 
-1. Standard user Google login.
-2. O/L and A/L registrations.
-3. Large bank slip photo compression and Firestore chunk upload.
-4. Admin payment-slip viewer.
-5. Approve with ticket number.
-6. EmailJS ticket delivery and QR image rendering.
-7. QR shown in user portal.
-8. First scan = ENTRY APPROVED.
-9. Second scan = ALREADY USED.
-10. Two admin phones scanning the same QR nearly simultaneously.
+Privileged writes are protected by Firestore Security Rules. An admin is either:
 
-## GitHub Pages
-For GitHub Pages deployment, see **GITHUB-PAGES-SETUP.md**. The included GitHub Actions workflow builds the Vite app and deploys `dist/` automatically with the correct repository base path.
+1. the verified Google account `lankaknot@gmail.com`, or
+2. a signed-in user whose `/users/{uid}` document has `admin: true`.
+
+Normal users cannot set their own `admin` field. Ticket approval and check-in use Firestore transactions, so duplicate ticket numbers and simultaneous double scans are protected atomically.
