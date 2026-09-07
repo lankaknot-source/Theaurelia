@@ -25,7 +25,11 @@ function requireAuth(request) {
 
 function requireAdmin(request) {
   const user = requireAuth(request);
-  if (user.token.admin !== true) throw new HttpsError('permission-denied', 'Admin access required.');
+  const email = String(user.token.email || '').trim().toLowerCase();
+  const isPrimaryAdmin = email === PRIMARY_ADMIN_EMAIL && user.token.email_verified === true;
+  if (user.token.admin !== true && !isPrimaryAdmin) {
+    throw new HttpsError('permission-denied', 'Admin access required.');
+  }
   return user;
 }
 

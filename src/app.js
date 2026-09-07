@@ -37,6 +37,7 @@ import {
 } from './utils.js';
 
 const app = document.querySelector('#app');
+const PRIMARY_ADMIN_EMAIL = 'lankaknot@gmail.com';
 const state = {
   user: null,
   isAdmin: false,
@@ -157,7 +158,9 @@ async function prepareSignedInUser(user) {
   }
 
   const token = await user.getIdTokenResult(true);
-  state.isAdmin = token.claims.admin === true;
+  const signedInEmail = String(user.email || '').trim().toLowerCase();
+  const isPrimaryAdmin = signedInEmail === PRIMARY_ADMIN_EMAIL && user.emailVerified === true;
+  state.isAdmin = token.claims.admin === true || isPrimaryAdmin;
 
   state.unsubRegistration?.();
   state.unsubRegistration = onSnapshot(doc(db, 'registrations', user.uid), (snap) => {
