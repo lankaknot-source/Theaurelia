@@ -1,3 +1,9 @@
+# The Aurelia 2K26 — Final Spark + EmailJS build
+
+This build includes the mobile Google-login fix, Spark/no-Blaze Firestore workflows, primary admin `lankaknot@gmail.com`, Firestore-compressed payment slips, approval/rejection, admin promotion, unique QR tickets, atomic one-time check-in, and EmailJS approval mail.
+
+EmailJS is preconfigured with `service_n7vufh1` / `template_x20qk9h`. It does **not** use paid EmailJS attachments; the email contains a **VIEW MY QR TICKET** button instead. See `EMAILJS-SETUP.md`.
+
 # The Aurelia 2K26 — Spark / No-Blaze Edition
 
 This edition is designed to run without Firebase Cloud Functions, so Firebase's Blaze billing upgrade is not required for the app workflow.
@@ -75,3 +81,9 @@ Privileged writes are protected by Firestore Security Rules. An admin is either:
 2. a signed-in user whose `/users/{uid}` document has `admin: true`.
 
 Normal users cannot set their own `admin` field. Ticket approval and check-in use Firestore transactions, so duplicate ticket numbers and simultaneous double scans are protected atomically.
+
+## Mobile Google sign-in on GitHub Pages
+
+This build uses `signInWithPopup()` on both desktop and mobile and explicitly enables `browserLocalPersistence`. The previous mobile-only `signInWithRedirect()` flow can lose its auth state when the app is hosted on GitHub Pages because modern browsers restrict cross-origin storage used by Firebase redirect helpers.
+
+Also add `lankaknot-source.github.io` under Firebase Console > Authentication > Settings > Authorized domains.

@@ -3,8 +3,8 @@ import { Html5Qrcode } from 'https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/+es
 import {
   onAuthStateChanged,
   signInWithPopup,
-  signInWithRedirect,
-  getRedirectResult,
+  setPersistence,
+  browserLocalPersistence,
   signOut,
 } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-auth.js';
 import {
@@ -23,7 +23,7 @@ import {
 } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js';
 import { auth, db, googleProvider } from './firebase.js';
 import { initThreeBackground } from './three-bg.js';
-import { EMAILJS_PUBLIC_KEY, EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID } from './emailjs-config.js';
+import { EMAILJS_PUBLIC_KEY, EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, TICKET_PORTAL_URL } from './emailjs-config.js';
 import { createEnhancedSlipUrl, readPaymentSlipBlob, savePaymentSlipToFirestore } from './firestore-images.js';
 import {
   EVENT_NAME,
@@ -70,14 +70,14 @@ function batchLabel(batch) {
 
 async function sendTicketEmail(reg) {
   if (!EMAILJS_SERVICE_ID || !EMAILJS_TEMPLATE_ID || !EMAILJS_PUBLIC_KEY) {
-    throw new Error('EmailJS Service ID / Template ID is not configured yet. Edit src/emailjs-config.js.');
+    throw new Error('EmailJS configuration is incomplete. Check src/emailjs-config.js.');
   }
-  const qrPayload = `AURELIA2K26:${reg.token}`;
-  const qrDataUri = await QRCode.toDataURL(qrPayload, {
-    width: 900,
-    margin: 2,
-    errorCorrectionLevel: 'H',
-  });
+
+  // No EmailJS attachment is required on the free plan. The email contains a secure
+  // button back to the portal; after Google sign-in the owner sees the live QR ticket.
+  const currentPortal = `${window.location.origin}${window.location.pathname}#ticket`;
+  const ticketUrl = TICKET_PORTAL_URL || currentPortal;
+
   const response = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -94,11 +94,15 @@ async function sendTicketEmail(reg) {
         batch: batchLabel(reg.batch),
         class_name: reg.className,
         id_number: reg.idNumber,
-        qr_image: qrDataUri,
+        ticket_url: ticketUrl,
       },
     }),
   });
-  if (!response.ok) throw new Error(`EmailJS ${response.status}: ${await response.text()}`);
+
+  if (!response.ok) {
+    const details = await response.text();
+    throw new Error(`EmailJS ${response.status}: ${details || 'send failed'}`);
+  }
   return true;
 }
 
@@ -308,14 +312,21 @@ async function handleGoogleLogin() {
   const btn = document.querySelector('#google-login');
   setBusy(btn, true, 'Opening Google...');
   try {
-    if (window.matchMedia('(max-width: 720px)').matches) {
-      await signInWithRedirect(auth, googleProvider);
-    } else {
-      await signInWithPopup(auth, googleProvider);
-    }
+    // GitHub Pages + Firebase redirect auth can fail on modern mobile browsers
+    // because the auth helper lives on a different origin. Use a user-initiated
+    // popup on every device and explicitly keep the Firebase session locally.
+    await setPersistence(auth, browserLocalPersistence);
+    await signInWithPopup(auth, googleProvider);
   } catch (error) {
     console.error(error);
-    toast(error.message || 'Google sign-in failed.', 'error');
+    const code = String(error?.code || '');
+    if (code === 'auth/popup-blocked') {
+      toast('Google sign-in popup was blocked. Allow pop-ups for this site and try again.', 'error');
+    } else if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+      toast('Google sign-in was cancelled. Please try again.', 'error');
+    } else {
+      toast(error.message || 'Google sign-in failed.', 'error');
+    }
     setBusy(btn, false);
   }
 }
@@ -417,7 +428,7 @@ function renderRegistrationForm() {
           <div>
             <label class="mb-2 block text-sm font-bold">Gmail address</label>
             <input class="field opacity-70" value="${escapeHtml(state.user.email || '')}" disabled />
-            <p class="mt-2 text-xs text-slate-500">Your approved ticket will be sent to this Google account.</p>
+            <p class="mt-2 text-xs text-slate-500">Your approval email will be sent to this Google account with a button to open your live QR ticket.</p>
           </div>
           <div>
             <label class="mb-2 block text-sm font-bold">Bank payment slip</label>
@@ -503,7 +514,7 @@ async function renderRegistrationStatus(reg) {
         <div class="mb-7 grid h-16 w-16 place-items-center rounded-3xl ${pending ? 'bg-yellow-300/10 text-yellow-200' : 'bg-red-400/10 text-red-300'} text-3xl">${pending ? '⌛' : '!'}</div>
         <div class="text-xs font-extrabold tracking-[.18em] ${pending ? 'text-yellow-200' : 'text-red-300'}">${pending ? 'APPROVAL PENDING' : 'REGISTRATION REJECTED'}</div>
         <h1 class="mt-2 text-3xl font-black sm:text-5xl">${pending ? 'Your submission is under review.' : 'Action is required.'}</h1>
-        <p class="mt-4 max-w-2xl leading-7 text-slate-400">${pending ? 'The admin team will check your payment slip. When approved, your unique QR ticket will appear here and will be emailed automatically.' : `Reason: ${escapeHtml(reg.rejectionReason || 'Please contact the event administration team.')}`}</p>
+        <p class="mt-4 max-w-2xl leading-7 text-slate-400">${pending ? 'The admin team will check your payment slip. When approved, your unique QR ticket will appear here and an approval email with a secure ticket button will be sent automatically.' : `Reason: ${escapeHtml(reg.rejectionReason || 'Please contact the event administration team.')}`}</p>
 
         <div class="mt-8 grid gap-3 sm:grid-cols-2">
           <div class="glass-soft rounded-2xl p-4"><div class="text-xs text-slate-500">Name</div><div class="mt-1 font-bold">${escapeHtml(reg.fullName)}</div></div>
@@ -852,7 +863,6 @@ window.addEventListener('hashchange', () => {
   else renderHome();
 });
 
-getRedirectResult(auth).catch((error) => toast(error.message || 'Google sign-in failed.', 'error'));
 renderLoading();
 onAuthStateChanged(auth, async (user) => {
   if (!user) {
