@@ -1,4 +1,5 @@
 import QRCode from 'https://cdn.jsdelivr.net/npm/qrcode@1.5.4/+esm';
+import { jsPDF } from 'https://cdn.jsdelivr.net/npm/jspdf@2.5.2/+esm';
 import { Html5Qrcode } from 'https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/+esm';
 import {
   onAuthStateChanged,
@@ -57,11 +58,27 @@ function randomTicketToken() {
 }
 
 function cleanTicketNumber(value) {
-  const v = String(value || '').trim().toUpperCase();
-  if (!/^[A-Z0-9][A-Z0-9\-_/]{1,29}$/.test(v)) {
-    throw new Error('Ticket number must be 2-30 characters using letters, numbers, -, _ or /.');
+  const v = String(value || '').trim().replace(/\s+/g, ' ').toUpperCase();
+  // Manual ticket numbers may be as short as a single digit and may contain
+  // common separators such as A26/001, VIP-07, 2026.001 or A 001.
+  if (!/^[A-Z0-9][A-Z0-9 ._\-/]{0,29}$/.test(v)) {
+    throw new Error('Ticket number must be 1-30 characters using letters, numbers, spaces, -, _, . or /.');
   }
   return v;
+}
+
+function ticketNumberDocId(ticketNumber) {
+  // Firestore document IDs cannot contain raw "/" path separators. Encoding keeps
+  // the human ticket number unchanged while giving us a safe unique lookup key.
+  return encodeURIComponent(ticketNumber);
+}
+
+function cleanNicNumber(value) {
+  const nic = String(value || '').trim().replace(/[\s-]+/g, '').toUpperCase();
+  if (!/^(?:\d{9}[VX]|\d{12})$/.test(nic)) {
+    throw new Error('Enter a valid Sri Lankan NIC: 9 digits + V/X (old format) or 12 digits (new format).');
+  }
+  return nic;
 }
 
 function batchLabel(batch) {
@@ -109,7 +126,7 @@ async function sendTicketEmail(reg) {
 async function approveRegistrationDirect({ uid, ticketNumber }) {
   const number = cleanTicketNumber(ticketNumber);
   const registrationRef = doc(db, 'registrations', uid);
-  const ticketNumberRef = doc(db, 'ticketNumbers', number);
+  const ticketNumberRef = doc(db, 'ticketNumbers', ticketNumberDocId(number));
   const token = randomTicketToken();
   const ticketRef = doc(db, 'tickets', token);
   let registrationData;
@@ -422,8 +439,9 @@ function renderRegistrationForm() {
             <input class="field" name="className" required maxlength="50" placeholder="e.g. 11-A / 13-Maths-A" />
           </div>
           <div>
-            <label class="mb-2 block text-sm font-bold">ID number</label>
-            <input class="field" name="idNumber" required minlength="3" maxlength="40" placeholder="Student / event ID number" />
+            <label class="mb-2 block text-sm font-bold">NIC number</label>
+            <input class="field" name="idNumber" required minlength="10" maxlength="12" inputmode="text" autocapitalize="characters" autocomplete="off" pattern="(?:[0-9]{9}[VvXx]|[0-9]{12})" title="Enter 9 digits followed by V/X, or a 12-digit NIC" placeholder="e.g. 200712345678 or 981234567V" />
+            <p class="mt-2 text-xs text-slate-500">Sri Lankan NIC: old format (9 digits + V/X) or new 12-digit format.</p>
           </div>
           <div>
             <label class="mb-2 block text-sm font-bold">Gmail address</label>
@@ -483,7 +501,7 @@ async function submitRegistration(event) {
       fullName: String(data.get('fullName')).trim(),
       batch: state.selectedBatch,
       className: String(data.get('className')).trim(),
-      idNumber: String(data.get('idNumber')).trim(),
+      idNumber: cleanNicNumber(data.get('idNumber')),
       paymentAmount: EVENT_PRICE,
       paymentSlipId: slip.slipId,
       paymentSlipBytes: slip.byteLength,
@@ -520,13 +538,204 @@ async function renderRegistrationStatus(reg) {
           <div class="glass-soft rounded-2xl p-4"><div class="text-xs text-slate-500">Name</div><div class="mt-1 font-bold">${escapeHtml(reg.fullName)}</div></div>
           <div class="glass-soft rounded-2xl p-4"><div class="text-xs text-slate-500">Batch</div><div class="mt-1 font-bold">${reg.batch === 'OL2023' ? '2023 O/L' : '2026 A/L'}</div></div>
           <div class="glass-soft rounded-2xl p-4"><div class="text-xs text-slate-500">Class</div><div class="mt-1 font-bold">${escapeHtml(reg.className)}</div></div>
-          <div class="glass-soft rounded-2xl p-4"><div class="text-xs text-slate-500">ID Number</div><div class="mt-1 font-bold">${escapeHtml(reg.idNumber)}</div></div>
+          <div class="glass-soft rounded-2xl p-4"><div class="text-xs text-slate-500">NIC Number</div><div class="mt-1 font-bold">${escapeHtml(reg.idNumber)}</div></div>
         </div>
 
         ${state.isAdmin ? `<button data-action="admin" class="btn-primary mt-6 w-full sm:w-auto">Open Admin Panel</button>` : ''}
       </div>
     </section>`);
   bindGlobalActions();
+}
+
+
+function roundRectPath(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + width, y, x + width, y + height, r);
+  ctx.arcTo(x + width, y + height, x, y + height, r);
+  ctx.arcTo(x, y + height, x, y, r);
+  ctx.arcTo(x, y, x + width, y, r);
+  ctx.closePath();
+}
+
+function drawPdfText(ctx, text, x, y, maxWidth, startSize, weight = 700, color = '#ffffff') {
+  const value = String(text || '-');
+  let size = startSize;
+  ctx.fillStyle = color;
+  ctx.textBaseline = 'alphabetic';
+  while (size > 22) {
+    ctx.font = `${weight} ${size}px Inter, Arial, sans-serif`;
+    if (ctx.measureText(value).width <= maxWidth) break;
+    size -= 2;
+  }
+  ctx.fillText(value, x, y, maxWidth);
+}
+
+function loadCanvasImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Could not render QR image for the PDF.'));
+    img.src = src;
+  });
+}
+
+async function downloadTicketPdf(reg, qrData, used = false) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 2100;
+  canvas.height = 900;
+  const ctx = canvas.getContext('2d', { alpha: false });
+  if (!ctx) throw new Error('PDF canvas is not supported by this browser.');
+
+  // Premium dark-blue base.
+  const bg = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+  bg.addColorStop(0, '#06111f');
+  bg.addColorStop(.55, '#0a2033');
+  bg.addColorStop(1, '#071522');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Aurelia blue -> green -> yellow signature strip.
+  const strip = ctx.createLinearGradient(0, 0, canvas.width, 0);
+  strip.addColorStop(0, '#38bdf8');
+  strip.addColorStop(.52, '#4ade80');
+  strip.addColorStop(1, '#fde047');
+  ctx.fillStyle = strip;
+  ctx.fillRect(0, 0, canvas.width, 24);
+
+  // Decorative premium glow shapes.
+  ctx.globalAlpha = .10;
+  ctx.strokeStyle = '#38bdf8';
+  ctx.lineWidth = 4;
+  for (let i = 0; i < 5; i += 1) {
+    ctx.beginPath();
+    ctx.arc(210 + i * 190, 90 + (i % 2) * 70, 150 + i * 18, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = '#fde047';
+  for (let i = 0; i < 3; i += 1) {
+    ctx.beginPath();
+    ctx.arc(1810, 110, 110 + i * 85, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // Ticket frame.
+  roundRectPath(ctx, 58, 64, 1984, 774, 50);
+  ctx.fillStyle = 'rgba(3, 12, 23, .80)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(125, 211, 252, .26)';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  // Perforation between ticket body and QR stub.
+  ctx.save();
+  ctx.setLineDash([18, 16]);
+  ctx.strokeStyle = 'rgba(148, 163, 184, .38)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(1435, 100);
+  ctx.lineTo(1435, 800);
+  ctx.stroke();
+  ctx.restore();
+  ctx.fillStyle = '#06111f';
+  ctx.beginPath(); ctx.arc(1435, 64, 28, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(1435, 838, 28, 0, Math.PI * 2); ctx.fill();
+
+  // Brand header.
+  ctx.font = '800 28px Inter, Arial, sans-serif';
+  ctx.fillStyle = '#7dd3fc';
+  ctx.letterSpacing = '6px';
+  ctx.fillText('OFFICIAL ADMISSION TICKET', 120, 150);
+  ctx.letterSpacing = '0px';
+  ctx.font = '900 82px Inter, Arial, sans-serif';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText('THE AURELIA', 120, 245);
+  ctx.fillStyle = '#fde047';
+  ctx.fillText('2K26', 635, 245);
+
+  // Status badge.
+  roundRectPath(ctx, 1155, 126, 190, 62, 31);
+  ctx.fillStyle = used ? 'rgba(248,113,113,.15)' : 'rgba(74,222,128,.14)';
+  ctx.fill();
+  ctx.strokeStyle = used ? '#f87171' : '#4ade80';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.font = '900 28px Inter, Arial, sans-serif';
+  ctx.fillStyle = used ? '#fecaca' : '#bbf7d0';
+  ctx.textAlign = 'center';
+  ctx.fillText(used ? 'USED' : 'VALID', 1250, 167);
+  ctx.textAlign = 'left';
+
+  // Guest name.
+  ctx.font = '700 24px Inter, Arial, sans-serif';
+  ctx.fillStyle = '#64748b';
+  ctx.fillText('TICKET HOLDER', 120, 330);
+  drawPdfText(ctx, reg.fullName, 120, 398, 1190, 58, 900, '#ffffff');
+
+  const fields = [
+    ['TICKET NUMBER', reg.ticketNumber, '#fde68a'],
+    ['BATCH', batchLabel(reg.batch), '#ffffff'],
+    ['CLASS', reg.className, '#ffffff'],
+    ['NIC NUMBER', reg.idNumber, '#ffffff'],
+  ];
+  const positions = [
+    [120, 490], [740, 490], [120, 625], [740, 625],
+  ];
+  fields.forEach(([label, value, valueColor], index) => {
+    const [x, y] = positions[index];
+    ctx.font = '700 21px Inter, Arial, sans-serif';
+    ctx.fillStyle = '#64748b';
+    ctx.fillText(label, x, y);
+    drawPdfText(ctx, value, x, y + 48, 540, 36, 800, valueColor);
+  });
+
+  // Bottom security notice.
+  roundRectPath(ctx, 120, 710, 1225, 78, 22);
+  ctx.fillStyle = 'rgba(250, 204, 21, .055)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(253, 224, 71, .17)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.font = '700 22px Inter, Arial, sans-serif';
+  ctx.fillStyle = '#fde68a';
+  ctx.fillText('SINGLE ENTRY', 150, 756);
+  ctx.font = '500 20px Inter, Arial, sans-serif';
+  ctx.fillStyle = '#94a3b8';
+  ctx.fillText('Present this QR at the entrance. The first successful scan permanently marks this ticket as USED.', 335, 756, 970);
+
+  // QR stub.
+  const qrImage = await loadCanvasImage(qrData);
+  roundRectPath(ctx, 1535, 180, 410, 410, 38);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.drawImage(qrImage, 1565, 210, 350, 350);
+
+  ctx.textAlign = 'center';
+  ctx.font = '900 23px Inter, Arial, sans-serif';
+  ctx.fillStyle = '#7dd3fc';
+  ctx.fillText('SCAN AT ENTRANCE', 1740, 648);
+  drawPdfText(ctx, reg.ticketNumber, 1560, 700, 360, 34, 900, '#fde68a');
+  ctx.textAlign = 'center';
+  ctx.font = '600 18px Inter, Arial, sans-serif';
+  ctx.fillStyle = '#64748b';
+  ctx.fillText('THE AURELIA 2K26', 1740, 756);
+  ctx.fillText('Secure QR Admission', 1740, 786);
+  ctx.textAlign = 'left';
+
+  // Render the designed ticket as one crisp landscape PDF page.
+  const image = canvas.toDataURL('image/jpeg', 0.95);
+  const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: [210, 90], compress: true });
+  pdf.setProperties({
+    title: `The Aurelia 2K26 - ${reg.ticketNumber}`,
+    subject: 'Official admission ticket',
+    author: 'The Aurelia 2K26',
+    creator: 'The Aurelia 2K26 Secure Ticketing Portal',
+  });
+  pdf.addImage(image, 'JPEG', 0, 0, 210, 90, undefined, 'FAST');
+  const safeNumber = String(reg.ticketNumber || 'ticket').replace(/[^A-Za-z0-9_-]+/g, '-');
+  pdf.save(`The-Aurelia-2K26-${safeNumber}.pdf`);
 }
 
 async function renderApprovedTicket(reg) {
@@ -545,7 +754,7 @@ async function renderApprovedTicket(reg) {
     <section class="mx-auto max-w-4xl py-5 sm:py-10">
       <div class="mb-5 flex flex-wrap items-center justify-between gap-3 no-print">
         <div><div class="text-xs font-extrabold tracking-[.18em] text-emerald-300">APPROVED</div><h1 class="mt-1 text-3xl font-black">Your official ticket</h1></div>
-        <div class="flex gap-2"><button id="print-ticket" class="btn-ghost">Print / Save PDF</button>${state.isAdmin ? `<button data-action="admin" class="btn-primary">Admin Panel</button>` : ''}</div>
+        <div class="flex gap-2"><button id="download-ticket-pdf" class="btn-ghost">Download PDF Ticket</button>${state.isAdmin ? `<button data-action="admin" class="btn-primary">Admin Panel</button>` : ''}</div>
       </div>
       <article class="ticket-shell">
         <div class="grid lg:grid-cols-[1fr_310px]">
@@ -559,7 +768,7 @@ async function renderApprovedTicket(reg) {
               <div><div class="text-xs uppercase tracking-wider text-slate-500">Ticket No.</div><div class="mt-1 text-lg font-black text-yellow-200">${escapeHtml(reg.ticketNumber)}</div></div>
               <div><div class="text-xs uppercase tracking-wider text-slate-500">Batch</div><div class="mt-1 font-bold">${reg.batch === 'OL2023' ? '2023 O/L Batch' : '2026 A/L Batch'}</div></div>
               <div><div class="text-xs uppercase tracking-wider text-slate-500">Class</div><div class="mt-1 font-bold">${escapeHtml(reg.className)}</div></div>
-              <div><div class="text-xs uppercase tracking-wider text-slate-500">ID No.</div><div class="mt-1 font-bold">${escapeHtml(reg.idNumber)}</div></div>
+              <div><div class="text-xs uppercase tracking-wider text-slate-500">NIC No.</div><div class="mt-1 font-bold">${escapeHtml(reg.idNumber)}</div></div>
             </div>
             <div class="mt-10 rounded-2xl border border-yellow-200/10 bg-yellow-200/5 p-4 text-sm leading-6 text-slate-400"><span class="font-bold text-yellow-100">Single-entry ticket.</span> The QR becomes USED immediately after a successful admin scan at the entrance.</div>
           </div>
@@ -572,7 +781,19 @@ async function renderApprovedTicket(reg) {
       ${used ? `<div class="mt-4 rounded-2xl border border-red-400/20 bg-red-950/25 p-4 text-sm text-red-200">This ticket has already been checked in${ticket?.usedAt ? ` on ${formatDate(ticket.usedAt)}` : ''}.</div>` : ''}
     </section>`);
 
-  document.querySelector('#print-ticket')?.addEventListener('click', () => window.print());
+  document.querySelector('#download-ticket-pdf')?.addEventListener('click', async (event) => {
+    const btn = event.currentTarget;
+    setBusy(btn, true, 'Creating PDF...');
+    try {
+      await downloadTicketPdf(reg, qrData, used);
+      toast('PDF ticket downloaded.', 'success');
+    } catch (error) {
+      console.error(error);
+      toast(error.message || 'Could not create the PDF ticket.', 'error');
+    } finally {
+      setBusy(btn, false);
+    }
+  });
   bindGlobalActions();
 }
 
@@ -645,16 +866,25 @@ function registrationAdminCard(r) {
       <span class="rounded-full px-2.5 py-1 text-[11px] font-black uppercase ${statusTone}">${escapeHtml(r.status)}</span>
     </div>
     <div class="mt-4 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
-      <div class="rounded-xl bg-white/[.025] p-2.5"><div class="text-slate-600">ID</div><div class="mt-1 truncate font-semibold text-slate-300">${escapeHtml(r.idNumber)}</div></div>
+      <div class="rounded-xl bg-white/[.025] p-2.5"><div class="text-slate-600">NIC</div><div class="mt-1 truncate font-semibold text-slate-300">${escapeHtml(r.idNumber)}</div></div>
       <div class="rounded-xl bg-white/[.025] p-2.5"><div class="text-slate-600">Amount</div><div class="mt-1 font-semibold text-slate-300">${formatMoney(r.paymentAmount || EVENT_PRICE)}</div></div>
       <div class="rounded-xl bg-white/[.025] p-2.5"><div class="text-slate-600">Ticket</div><div class="mt-1 truncate font-semibold text-yellow-100">${escapeHtml(r.ticketNumber || '—')}</div></div>
       <div class="rounded-xl bg-white/[.025] p-2.5"><div class="text-slate-600">Submitted</div><div class="mt-1 truncate font-semibold text-slate-300">${formatDate(r.createdAt)}</div></div>
     </div>
     <div class="mt-4 flex flex-wrap gap-2">
       <button data-view-slip="${r.id}" class="btn-ghost text-sm">View slip</button>
-      ${r.status === 'pending' ? `<button data-approve="${r.id}" class="btn-primary text-sm">Approve</button><button data-reject="${r.id}" class="btn-danger text-sm">Reject</button>` : ''}
       ${r.status === 'approved' ? `<button data-resend="${r.id}" class="btn-ghost text-sm">Resend email</button>` : ''}
     </div>
+    ${r.status === 'pending' ? `
+      <div class="mt-3 rounded-2xl border border-sky-300/10 bg-sky-300/[.035] p-3">
+        <label class="mb-2 block text-[11px] font-black uppercase tracking-[.14em] text-sky-300">Manual Ticket Number</label>
+        <div class="flex flex-col gap-2 sm:flex-row">
+          <input data-ticket-input="${r.id}" class="field flex-1" maxlength="30" autocomplete="off" placeholder="e.g. 001 or A26/001" />
+          <button data-approve="${r.id}" class="btn-primary whitespace-nowrap text-sm">Approve & Issue</button>
+          <button data-reject="${r.id}" class="btn-danger whitespace-nowrap text-sm">Reject</button>
+        </div>
+        <div class="mt-2 text-[11px] text-slate-500">1-30 characters. Numbers, letters and separators such as / - _ . are supported.</div>
+      </div>` : ''}
   </article>`;
 }
 
@@ -724,17 +954,31 @@ function bindAdminCardActions(regs) {
 
   document.querySelectorAll('[data-approve]').forEach((btn) => btn.addEventListener('click', async () => {
     const reg = regs.find(r => r.id === btn.dataset.approve);
-    const ticketNumber = prompt(`Enter the ticket number for ${reg.fullName}:`);
-    if (!ticketNumber?.trim()) return;
-    setBusy(btn, true, 'Approving...');
+    const card = btn.closest('[data-reg-card]');
+    const input = card?.querySelector('[data-ticket-input]');
+    const rawNumber = input?.value || '';
+
+    let ticketNumber;
     try {
-      const result = await fn.approveRegistration({ uid: reg.uid, ticketNumber: ticketNumber.trim() });
+      ticketNumber = cleanTicketNumber(rawNumber);
+    } catch (error) {
+      input?.focus();
+      toast(error.message || 'Enter a valid ticket number.', 'error');
+      return;
+    }
+
+    if (!confirm(`Approve ${reg.fullName} and issue ticket ${ticketNumber}?`)) return;
+    setBusy(btn, true, 'Issuing...');
+    if (input) input.disabled = true;
+    try {
+      const result = await fn.approveRegistration({ uid: reg.uid, ticketNumber });
       toast(`Approved. Ticket ${result.data.ticketNumber} created.`, 'success');
       await loadAdminData();
     } catch (error) {
       console.error(error);
       toast(error.message || 'Approval failed.', 'error');
       setBusy(btn, false);
+      if (input) input.disabled = false;
     }
   }));
 
