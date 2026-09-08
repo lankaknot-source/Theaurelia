@@ -582,17 +582,18 @@ function loadCanvasImage(src) {
 }
 
 async function downloadTicketPdf(reg, qrData, used = false) {
+  // Portrait ticket canvas (2:3) designed for clear phone viewing and printing.
   const canvas = document.createElement('canvas');
-  canvas.width = 2100;
-  canvas.height = 900;
+  canvas.width = 1200;
+  canvas.height = 1800;
   const ctx = canvas.getContext('2d', { alpha: false });
   if (!ctx) throw new Error('PDF canvas is not supported by this browser.');
 
-  // Premium dark-blue base.
+  // Premium deep-blue background.
   const bg = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
-  bg.addColorStop(0, '#06111f');
-  bg.addColorStop(.55, '#0a2033');
-  bg.addColorStop(1, '#071522');
+  bg.addColorStop(0, '#04101d');
+  bg.addColorStop(.48, '#092238');
+  bg.addColorStop(1, '#06131f');
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -602,138 +603,130 @@ async function downloadTicketPdf(reg, qrData, used = false) {
   strip.addColorStop(.52, '#4ade80');
   strip.addColorStop(1, '#fde047');
   ctx.fillStyle = strip;
-  ctx.fillRect(0, 0, canvas.width, 24);
+  ctx.fillRect(0, 0, canvas.width, 22);
 
-  // Decorative premium glow shapes.
-  ctx.globalAlpha = .10;
-  ctx.strokeStyle = '#38bdf8';
-  ctx.lineWidth = 4;
-  for (let i = 0; i < 5; i += 1) {
-    ctx.beginPath();
-    ctx.arc(210 + i * 190, 90 + (i % 2) * 70, 150 + i * 18, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-  ctx.strokeStyle = '#fde047';
-  for (let i = 0; i < 3; i += 1) {
-    ctx.beginPath();
-    ctx.arc(1810, 110, 110 + i * 85, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-  ctx.globalAlpha = 1;
-
-  // Ticket frame.
-  roundRectPath(ctx, 58, 64, 1984, 774, 50);
-  ctx.fillStyle = 'rgba(3, 12, 23, .80)';
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(125, 211, 252, .26)';
-  ctx.lineWidth = 3;
-  ctx.stroke();
-
-  // Perforation between ticket body and QR stub.
+  // Decorative rings/glows.
   ctx.save();
-  ctx.setLineDash([18, 16]);
-  ctx.strokeStyle = 'rgba(148, 163, 184, .38)';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.moveTo(1435, 100);
-  ctx.lineTo(1435, 800);
-  ctx.stroke();
+  ctx.globalAlpha = .09;
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = '#38bdf8';
+  [170, 260, 350].forEach((r) => {
+    ctx.beginPath();
+    ctx.arc(1080, 180, r, 0, Math.PI * 2);
+    ctx.stroke();
+  });
+  ctx.strokeStyle = '#4ade80';
+  [120, 210].forEach((r) => {
+    ctx.beginPath();
+    ctx.arc(80, 1470, r, 0, Math.PI * 2);
+    ctx.stroke();
+  });
   ctx.restore();
-  ctx.fillStyle = '#06111f';
-  ctx.beginPath(); ctx.arc(1435, 64, 28, 0, Math.PI * 2); ctx.fill();
-  ctx.beginPath(); ctx.arc(1435, 838, 28, 0, Math.PI * 2); ctx.fill();
 
-  // Brand header.
-  ctx.font = '800 28px Inter, Arial, sans-serif';
+  // Outer ticket frame.
+  roundRectPath(ctx, 48, 52, 1104, 1696, 48);
+  ctx.fillStyle = 'rgba(2, 10, 20, .80)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(125, 211, 252, .28)';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  // Header label.
+  ctx.textAlign = 'center';
+  ctx.font = '800 25px Inter, Arial, sans-serif';
   ctx.fillStyle = '#7dd3fc';
-  ctx.letterSpacing = '6px';
-  ctx.fillText('OFFICIAL ADMISSION TICKET', 120, 150);
-  ctx.letterSpacing = '0px';
-  ctx.font = '900 82px Inter, Arial, sans-serif';
-  ctx.fillStyle = '#ffffff';
-  ctx.fillText('THE AURELIA', 120, 245);
-  ctx.fillStyle = '#fde047';
-  ctx.fillText('2K26', 635, 245);
+  ctx.fillText('OFFICIAL ADMISSION TICKET', 600, 135);
 
-  // Status badge.
-  roundRectPath(ctx, 1155, 126, 190, 62, 31);
-  ctx.fillStyle = used ? 'rgba(248,113,113,.15)' : 'rgba(74,222,128,.14)';
+  // Brand on two clean lines so it can never overlap.
+  ctx.font = '900 70px Inter, Arial, sans-serif';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText('THE AURELIA', 600, 225);
+  ctx.font = '900 82px Inter, Arial, sans-serif';
+  ctx.fillStyle = '#fde047';
+  ctx.fillText('2K26', 600, 310);
+
+  // Status pill.
+  roundRectPath(ctx, 465, 342, 270, 66, 33);
+  ctx.fillStyle = used ? 'rgba(248,113,113,.14)' : 'rgba(74,222,128,.14)';
   ctx.fill();
   ctx.strokeStyle = used ? '#f87171' : '#4ade80';
   ctx.lineWidth = 2;
   ctx.stroke();
   ctx.font = '900 28px Inter, Arial, sans-serif';
   ctx.fillStyle = used ? '#fecaca' : '#bbf7d0';
-  ctx.textAlign = 'center';
-  ctx.fillText(used ? 'USED' : 'VALID', 1250, 167);
+  ctx.fillText(used ? 'USED' : 'VALID', 600, 385);
+
+  // Ticket holder section.
   ctx.textAlign = 'left';
-
-  // Guest name.
-  ctx.font = '700 24px Inter, Arial, sans-serif';
+  ctx.font = '700 20px Inter, Arial, sans-serif';
   ctx.fillStyle = '#64748b';
-  ctx.fillText('TICKET HOLDER', 120, 330);
-  drawPdfText(ctx, reg.fullName, 120, 398, 1190, 58, 900, '#ffffff');
+  ctx.fillText('TICKET HOLDER', 115, 475);
+  drawPdfText(ctx, reg.fullName, 115, 540, 970, 50, 900, '#ffffff');
 
-  const fields = [
-    ['TICKET NUMBER', reg.ticketNumber, '#fde68a'],
-    ['BATCH', batchLabel(reg.batch), '#ffffff'],
-    ['CLASS', reg.className, '#ffffff'],
-    ['NIC NUMBER', reg.idNumber, '#ffffff'],
-  ];
-  const positions = [
-    [120, 490], [740, 490], [120, 625], [740, 625],
-  ];
-  fields.forEach(([label, value, valueColor], index) => {
-    const [x, y] = positions[index];
-    ctx.font = '700 21px Inter, Arial, sans-serif';
-    ctx.fillStyle = '#64748b';
-    ctx.fillText(label, x, y);
-    drawPdfText(ctx, value, x, y + 48, 540, 36, 800, valueColor);
-  });
-
-  // Bottom security notice.
-  roundRectPath(ctx, 120, 710, 1225, 78, 22);
-  ctx.fillStyle = 'rgba(250, 204, 21, .055)';
+  // Details card.
+  roundRectPath(ctx, 95, 590, 1010, 330, 30);
+  ctx.fillStyle = 'rgba(7, 21, 34, .92)';
   ctx.fill();
-  ctx.strokeStyle = 'rgba(253, 224, 71, .17)';
+  ctx.strokeStyle = 'rgba(56, 189, 248, .16)';
   ctx.lineWidth = 2;
   ctx.stroke();
-  ctx.font = '700 22px Inter, Arial, sans-serif';
-  ctx.fillStyle = '#fde68a';
-  ctx.fillText('SINGLE ENTRY', 150, 756);
-  ctx.font = '500 20px Inter, Arial, sans-serif';
-  ctx.fillStyle = '#94a3b8';
-  ctx.fillText('Present this QR at the entrance. The first successful scan permanently marks this ticket as USED.', 335, 756, 970);
 
-  // QR stub.
+  // Divider lines.
+  ctx.strokeStyle = 'rgba(148, 163, 184, .15)';
+  ctx.beginPath();
+  ctx.moveTo(600, 620); ctx.lineTo(600, 890);
+  ctx.moveTo(125, 755); ctx.lineTo(1075, 755);
+  ctx.stroke();
+
+  const detailFields = [
+    ['TICKET NUMBER', reg.ticketNumber, '#fde68a', 135, 655, 410],
+    ['BATCH', batchLabel(reg.batch), '#ffffff', 635, 655, 410],
+    ['CLASS', reg.className, '#ffffff', 135, 790, 410],
+    ['NIC NUMBER', reg.idNumber, '#ffffff', 635, 790, 410],
+  ];
+  detailFields.forEach(([label, value, color, x, y, maxWidth]) => {
+    ctx.font = '700 19px Inter, Arial, sans-serif';
+    ctx.fillStyle = '#64748b';
+    ctx.fillText(label, x, y);
+    drawPdfText(ctx, value, x, y + 55, maxWidth, 34, 850, color);
+  });
+
+  // QR area.
   const qrImage = await loadCanvasImage(qrData);
-  roundRectPath(ctx, 1535, 180, 410, 410, 38);
+  roundRectPath(ctx, 295, 975, 610, 610, 44);
   ctx.fillStyle = '#ffffff';
   ctx.fill();
-  ctx.drawImage(qrImage, 1565, 210, 350, 350);
+  ctx.drawImage(qrImage, 335, 1015, 530, 530);
 
   ctx.textAlign = 'center';
   ctx.font = '900 23px Inter, Arial, sans-serif';
   ctx.fillStyle = '#7dd3fc';
-  ctx.fillText('SCAN AT ENTRANCE', 1740, 648);
-  drawPdfText(ctx, reg.ticketNumber, 1560, 700, 360, 34, 900, '#fde68a');
-  ctx.textAlign = 'center';
-  ctx.font = '600 18px Inter, Arial, sans-serif';
+  ctx.fillText('SCAN AT ENTRANCE', 600, 1625);
+
+  ctx.font = '900 34px Inter, Arial, sans-serif';
+  ctx.fillStyle = '#fde68a';
+  const ticketText = String(reg.ticketNumber || '-');
+  ctx.fillText(ticketText, 600, 1675, 900);
+
+  // Footer security notice.
+  ctx.font = '600 17px Inter, Arial, sans-serif';
+  ctx.fillStyle = '#94a3b8';
+  ctx.fillText('Single entry • First successful scan permanently marks this ticket as USED', 600, 1715);
+  ctx.font = '700 16px Inter, Arial, sans-serif';
   ctx.fillStyle = '#64748b';
-  ctx.fillText('THE AURELIA 2K26', 1740, 756);
-  ctx.fillText('Secure QR Admission', 1740, 786);
+  ctx.fillText('THE AURELIA 2K26 • SECURE QR ADMISSION', 600, 1745);
   ctx.textAlign = 'left';
 
-  // Render the designed ticket as one crisp landscape PDF page.
-  const image = canvas.toDataURL('image/jpeg', 0.95);
-  const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: [210, 90], compress: true });
+  // Render as one high-quality portrait PDF page.
+  const image = canvas.toDataURL('image/jpeg', 0.97);
+  const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: [100, 150], compress: true });
   pdf.setProperties({
     title: `The Aurelia 2K26 - ${reg.ticketNumber}`,
     subject: 'Official admission ticket',
     author: 'The Aurelia 2K26',
     creator: 'The Aurelia 2K26 Secure Ticketing Portal',
   });
-  pdf.addImage(image, 'JPEG', 0, 0, 210, 90, undefined, 'FAST');
+  pdf.addImage(image, 'JPEG', 0, 0, 100, 150, undefined, 'FAST');
   const safeNumber = String(reg.ticketNumber || 'ticket').replace(/[^A-Za-z0-9_-]+/g, '-');
   pdf.save(`The-Aurelia-2K26-${safeNumber}.pdf`);
 }
